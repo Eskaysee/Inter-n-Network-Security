@@ -9,12 +9,10 @@ import org.bouncycastle.operator.OperatorCreationException;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 
 import javax.crypto.spec.SecretKeySpec;
-import javax.net.ssl.SSLServerSocket;
-import javax.net.ssl.SSLServerSocketFactory;
-import javax.net.ssl.SSLSocket;
+
 import java.io.*;
 import java.math.BigInteger;
-import java.net.ServerSocket;
+import javax.net.ssl.SSLSocket;
 import java.security.*;
 import java.security.cert.CertificateEncodingException;
 import java.security.cert.CertificateException;
@@ -25,17 +23,31 @@ import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.Date;
 
-public class CertificateAuthority {
+public class CertificateAuthority implements Runnable {
 
-    private static X509Certificate[] certs;
-    private static PublicKey myPublicKey;
-    private static PrivateKey myPrivateKey;
-    private static SSLServerSocket MyService;
-    private static SSLSocket clientService;
-    private static DataInputStream input;
-    private static DataOutputStream output;
+    private  X509Certificate[] certs;
+    private  PublicKey myPublicKey;
+    private  PrivateKey myPrivateKey;
+    private  SSLSocket clientService;
+    private  DataInputStream input;
+    private  DataOutputStream output;
+    private final Object fileLock = new Object();
 
-    private static byte[] readAllBytes (File file) {
+
+    public CertificateAuthority(SSLSocket clientService, DataInputStream input, DataOutputStream output) {
+        this.clientService = clientService;
+        this.input = input;
+        this.output = output;
+        if (myPrivateKey == null || myPublicKey == null) {
+            try {
+                getKeys();
+            } catch (NoSuchAlgorithmException e) {
+                throw new RuntimeException(e);
+            }
+        }
+    }
+
+    private synchronized byte[] readAllBytes (File file) {
         try {
             FileInputStream fis = new FileInputStream(file);
             byte[] fileBytes = new byte[(int) file.length()];
@@ -49,25 +61,27 @@ public class CertificateAuthority {
         }
     }
 
-    private static KeyPair generateAsymKeys(String owner) throws NoSuchAlgorithmException {
+    private  KeyPair generateAsymKeys(String owner) throws NoSuchAlgorithmException {
         KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
         generator.initialize(2048);
         KeyPair pair = generator.generateKeyPair();
         PrivateKey privateKey = pair.getPrivate();
         PublicKey publicKey = pair.getPublic();
-        try (FileOutputStream fosPub = new FileOutputStream(owner+".pub")) {
-            fosPub.write(publicKey.getEncoded());
-            fosPub.close();
-            FileOutputStream fosPriv = new FileOutputStream(owner);
-            fosPriv.write(privateKey.getEncoded());
-            fosPriv.close();
-        } catch (IOException e) {
-            throw new RuntimeException(e);
+        synchronized (fileLock) {
+            try (FileOutputStream fosPub = new FileOutputStream(owner+".pub")) {
+                fosPub.write(publicKey.getEncoded());
+                fosPub.close();
+                FileOutputStream fosPriv = new FileOutputStream(owner);
+                fosPriv.write(privateKey.getEncoded());
+                fosPriv.close();
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
         }
         return pair;
     }
 
-    private static void getKeys() throws NoSuchAlgorithmException {
+    private  void getKeys() throws NoSuchAlgorithmException {
         File myPubKeyFile = new File("CA.pub");
         File myPrivKeyFile = new File("CA");
         try {
@@ -89,7 +103,7 @@ public class CertificateAuthority {
         }
     }
 
-    private static X509Certificate generateCert(String client, PublicKey clientPK) {
+    private  X509Certificate generateCert(String client, PublicKey clientPK) {
         X509Certificate cert;
         try {
             // Certificate subject and issuer names
@@ -139,28 +153,23 @@ public class CertificateAuthority {
         } catch (OperatorCreationException e) {
             throw new RuntimeException(e);
         }
-        try (FileOutputStream fos = new FileOutputStream(client+".pem");) {
-            fos.write(cert.getEncoded());
-        } catch (FileNotFoundException e) {
-            throw new RuntimeException(e);
-        } catch (CertificateEncodingException e) {
-            throw new RuntimeException(e);
-        } catch (IOException e) {
-            throw new RuntimeException(e);
+        synchronized (fileLock) {
+            try (FileOutputStream fos = new FileOutputStream(client+".pem");) {
+                fos.write(cert.getEncoded());
+            } catch (FileNotFoundException e) {
+                throw new RuntimeException(e);
+            } catch (CertificateEncodingException e) {
+                throw new RuntimeException(e);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
         }
         return cert;
     }
 
-    public static void main(String[] args) {
+    @Override
+    public void run() {
         try {
-            if (myPrivateKey == null || myPublicKey == null) getKeys();
-            SSLServerSocketFactory serverSocketFactory = (SSLServerSocketFactory) SSLServerSocketFactory.getDefault();
-            MyService = (SSLServerSocket) serverSocketFactory.createServerSocket(8888);
-            System.out.println("Server is running");
-            clientService = (SSLSocket) MyService.accept();
-            input = new DataInputStream(clientService.getInputStream());
-            output = new DataOutputStream(clientService.getOutputStream());
-
             while (!clientService.isClosed()){
                 String request = input.readUTF();
                 if (request.equals("Create Certificate")){
@@ -176,11 +185,10 @@ public class CertificateAuthority {
                     generateCert(client, clientKey);
                 }
             }
-
-            clientService.close();
+            System.out.println("Client Disconnected");
             output.close();
             input.close();
-            MyService.close();
+            clientService.close();
         } catch (NoSuchAlgorithmException e) {
             throw new RuntimeException(e);
         } catch (IOException e) {
