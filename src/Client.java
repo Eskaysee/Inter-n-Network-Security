@@ -154,6 +154,7 @@ public class Client {
             throw new RuntimeException(e);
         } catch (SignatureException | InvalidKeyException e) {
             System.out.println("Not From the Certificate Authority!");
+            System.out.println("Closing the Program while we Investigate");
             throw new RuntimeException(e);
         } catch (IOException | NoSuchProviderException e) {
             throw new RuntimeException(e);
