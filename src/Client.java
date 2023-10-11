@@ -27,15 +27,15 @@ import java.util.zip.ZipOutputStream;
 
 public class Client {
 
-    private static Socket MyClient;
+    private static SSLSocket MyClient;
     private static DataInputStream input;
     private static DataOutputStream output;
 
     private static PublicKey myPublicKey;
     private static PrivateKey myPrivateKey;
-    private static X509Certificate cert;
+    private static PublicKey caPublicKey;
     private static SecretKey sessionKey;
-    private static PublicKey bobPublicKey;
+    private static PublicKey otherPublicKey;
     static final IvParameterSpec iv = generateIv();
 
     private static IvParameterSpec generateIv() {
@@ -76,11 +76,11 @@ public class Client {
         return pair;
     }
     
-    private static SecretKey generateSymKeys() throws NoSuchAlgorithmException {
+    private static SecretKey generateSymKeys(String name1, String name2) throws NoSuchAlgorithmException {
         KeyGenerator generator = KeyGenerator.getInstance("AES");
         generator.init(128);
         SecretKey symKey = generator.generateKey();
-        try (FileOutputStream fos = new FileOutputStream("session.key")) {
+        try (FileOutputStream fos = new FileOutputStream(name1+name2+"Session.key")) {
             fos.write(symKey.getEncoded());
         } catch (IOException e) {
             throw new RuntimeException(e);
@@ -91,8 +91,6 @@ public class Client {
     private static void getKeys(String name) throws NoSuchAlgorithmException {
         File myPubKeyFile = new File(name+".pub");
         File myPrivKeyFile = new File(name);
-        File seshKeyFile = new File("session.key");
-        File bobPubKeyFile = new File("Bob.pub");
         try {
             if (myPubKeyFile.exists() && myPrivKeyFile.exists()){
                 byte[] myPubBytes = readAllBytes(myPubKeyFile);
@@ -102,6 +100,7 @@ public class Client {
                 myPublicKey = keyFactory.generatePublic(myPubKeySpec);
                 EncodedKeySpec myPrivKeySpec = new PKCS8EncodedKeySpec(myPrivBytes);
                 myPrivateKey = keyFactory.generatePrivate(myPrivKeySpec);
+                caPublicKey = getKeyFromCert("CA");
             } else {
                 KeyPair keyPair = generateAsymKeys(name);
                 myPrivateKey = keyPair.getPrivate();
@@ -110,41 +109,60 @@ public class Client {
                 Signature signature = Signature.getInstance("SHA256withRSA");
                 signature.initSign(myPrivateKey);
                 signature.update(name.getBytes());
-                SSLSocketFactory sslSocketFactory = (SSLSocketFactory) SSLSocketFactory.getDefault();
-                SSLSocket caClient = (SSLSocket) sslSocketFactory.createSocket("192.168.1.55", 8888);
-                caClient.startHandshake();
-                DataInputStream caIn = new DataInputStream(caClient.getInputStream());
-                DataOutputStream caOut = new DataOutputStream(caClient.getOutputStream());
-                caOut.writeUTF("Create Certificate");
-                caOut.writeUTF(name);
-                caOut.write(signature.sign());
-                caOut.write(myPublicKey.getEncoded());
-                //
-            }
-            if (bobPubKeyFile.exists()) {
-                KeyFactory keyFactory = KeyFactory.getInstance("RSA");
-                byte[] bobPubBytes = readAllBytes(bobPubKeyFile);
-                EncodedKeySpec bobPubKeySpec = new X509EncodedKeySpec(bobPubBytes);
-                bobPublicKey = keyFactory.generatePublic(bobPubKeySpec);
-            } else {
-                //
-            }
-            if (seshKeyFile.exists()){
-                byte[] seshBytes = readAllBytes(seshKeyFile);
-                sessionKey = new SecretKeySpec(seshBytes, "AES");
-            } else {
-                sessionKey = generateSymKeys();
-                establishComms();
+                Socket caClient = new Socket("localhost", 8820);
+                input = new DataInputStream(caClient.getInputStream());
+                output = new DataOutputStream(caClient.getOutputStream());
+                output.writeUTF("New client connected to Server!");
+                System.out.println(input.readUTF());
+
+                output.writeUTF("Create Certificate");
+                Client.output.writeUTF(receiveFile("CA.pem"));
+                caPublicKey = getKeyFromCert("CA");
+                output.writeUTF(name);
+                output.write(signature.sign());
+                output.write(myPublicKey.getEncoded());
+                if (!input.readBoolean()){
+                    System.out.println("CA failed to create certificate. " +
+                            "Signature didn't match the public key sent. Trying again...");
+                    myPrivKeyFile.delete(); myPubKeyFile.delete();
+                    caClient.shutdownInput(); caClient.shutdownOutput();
+                    input.close(); output.close(); caClient.close();
+                    getKeys(name);
+                }
+                Client.output.writeUTF(receiveFile(name+".pem"));
+                output.writeUTF("Disconnected");
+                caClient.shutdownInput(); caClient.shutdownOutput();
+                input.close(); output.close(); caClient.close();
+                System.out.println("Disconnected");
             }
         } catch (InvalidKeySpecException e) {
             throw new RuntimeException(e);
         } catch (UnknownHostException e) {
             throw new RuntimeException(e);
-        } catch (IOException e) {
+        } catch (SignatureException e) {
             throw new RuntimeException(e);
         } catch (InvalidKeyException e) {
             throw new RuntimeException(e);
-        } catch (SignatureException e) {
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static PublicKey getKeyFromCert(String name) throws NoSuchAlgorithmException {
+        try (FileInputStream fis = new FileInputStream(name+".pem")) {
+            CertificateFactory cf = CertificateFactory.getInstance("X.509");
+            X509Certificate cert = (X509Certificate) cf.generateCertificate(fis);
+            if (caPublicKey != null) cert.verify(caPublicKey);
+            return cert.getPublicKey();
+        } catch (FileNotFoundException e) {
+            throw new RuntimeException(e);
+        } catch (CertificateException e) {
+            System.out.println("Faulty Certificate");
+            throw new RuntimeException(e);
+        } catch (SignatureException | InvalidKeyException e) {
+            System.out.println("Not From the Certificate Authority!");
+            throw new RuntimeException(e);
+        } catch (IOException | NoSuchProviderException e) {
             throw new RuntimeException(e);
         }
     }
@@ -242,11 +260,11 @@ public class Client {
         }
     }
 
-    private static void encrypt(SecretKey sessionKey, PublicKey bobPublicKey) throws NoSuchAlgorithmException {
+    private static void encrypt(SecretKey sessionKey, PublicKey otherPublicKey) throws NoSuchAlgorithmException {
         Cipher cipher = null;
         try {
             cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding");
-            cipher.init(Cipher.ENCRYPT_MODE, bobPublicKey);
+            cipher.init(Cipher.ENCRYPT_MODE, otherPublicKey);
             byte[] encryptedSK = cipher.doFinal(sessionKey.getEncoded());
             //Overwrite the zip file
             FileOutputStream  stream = new FileOutputStream("session.key");
@@ -303,7 +321,7 @@ public class Client {
             }
             // Here we received file
             fileOutputStream.close();
-            return "Files received";
+            return fileName+" received";
         } catch (FileNotFoundException e) {
             throw new RuntimeException(e);
         } catch (IOException e) {
@@ -440,10 +458,26 @@ public class Client {
         return secondHash.equals(firstHash);
     }
 
-    private static void establishComms() throws NoSuchAlgorithmException {
+    private static void establishComms(String from, String to) throws NoSuchAlgorithmException {
+        File otherCertFile = new File(to+".pem");
+        File seshKeyFile = new File(from+to+"Session.key");
+        if (otherCertFile.exists()) {
+            otherPublicKey = getKeyFromCert(otherCertFile.getName());
+            if (seshKeyFile.exists()){
+                byte[] seshBytes = readAllBytes(seshKeyFile);
+                sessionKey = new SecretKeySpec(seshBytes, "AES");
+            } else {
+                sessionKey = generateSymKeys(from, to);
+            }
+        } else {
+            otherPublicKey = requestOthersKey(to);
+            sessionKey = generateSymKeys(from, to);
+        }
         File dir = new File("EstComms");
         dir.mkdir();
-        String plaintext = "Hi Bob, it's Alice.\nPlease send me Pictures/Images?\nMuch appreciated, thanks!";
+        String plaintext = "Hi "+to+", it's "+from+".\n" +
+                "I've sent you a session key for us to use in future communications.\n" +
+                "I look forward to hearing from you!";
         try {
             FileWriter file = new FileWriter(dir.getName()+"/First Request.txt");
             file.write(plaintext);
@@ -456,30 +490,61 @@ public class Client {
         compressFiles(new String[]{dir.getName()+"/Image Hash.txt",dir.getName()+"/First Contact.txt"}, dir.getName()+".zip");
         File zip1stRequest = new File(dir.getName()+".zip");
         encrypt(zip1stRequest, sessionKey, iv);
-        encrypt(sessionKey, bobPublicKey);
+        encrypt(sessionKey, otherPublicKey);
         String ivAsString = Base64.getEncoder().encodeToString(iv.getIV());
     }
 
-    public static void main(String[] args) throws NoSuchAlgorithmException {
+    private static PublicKey requestOthersKey(String name) throws NoSuchAlgorithmException {
         try {
-            if (myPrivateKey == null || myPublicKey == null) getKeys("Alice");
-            final IvParameterSpec iv = generateIv();
-            //Connect to Bob
-            MyClient = new Socket("192.168.1.55", 8888); //machine IP & Port number for service > 1023
-            input = new DataInputStream(MyClient.getInputStream());
-            output = new DataOutputStream(MyClient.getOutputStream());
-
+            Socket caClient = new Socket("localhost", 8820);
+            input = new DataInputStream(caClient.getInputStream());
+            output = new DataOutputStream(caClient.getOutputStream());
+            Client.output.writeUTF("New client connected to Server!");
+            System.out.println(Client.input.readUTF());
             //
-
-            MyClient.shutdownInput();
-            MyClient.shutdownOutput();
-            input.close();
-            output.close();
-            MyClient.close();
+            output.writeUTF("Requesting Certificate");
+            output.writeUTF(name);
+            Client.output.writeUTF(receiveFile(name+".pem"));
+            //
+            caClient.shutdownInput(); caClient.shutdownOutput();
+            input.close(); output.close(); caClient.close();
+            return getKeyFromCert(name);
         } catch (UnknownHostException e) {
             throw new RuntimeException(e);
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
+    }
+
+    public static void main(String[] args) throws NoSuchAlgorithmException {
+        String myName = "Alice";//args[0];
+//        try {
+            if (myPrivateKey == null || myPublicKey == null) getKeys(myName);
+            if (otherPublicKey == null) {
+                establishComms(myName, "Bob");
+            }
+//            final IvParameterSpec iv = generateIv();
+            //Connect to Bob
+//            SSLSocketFactory sslSocketFactory = (SSLSocketFactory) SSLSocketFactory.getDefault();
+//            MyClient = (SSLSocket) sslSocketFactory.createSocket("192.168.1.59", 8820); //machine IP & Port number for service > 1023
+//            //CONFIGURATIONS
+//            MyClient.startHandshake();
+//            input = new DataInputStream(MyClient.getInputStream());
+//            output = new DataOutputStream(MyClient.getOutputStream());
+//
+//            if (otherPublicKey == null) {
+//                establishComms(myName, "Bob");
+//            }
+//
+//            MyClient.shutdownInput();
+//            MyClient.shutdownOutput();
+//            input.close();
+//            output.close();
+//            MyClient.close();
+//        } catch (UnknownHostException e) {
+//            throw new RuntimeException(e);
+//        } catch (IOException e) {
+//            throw new RuntimeException(e);
+//        }
     }
 }

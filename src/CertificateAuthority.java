@@ -8,11 +8,9 @@ import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.OperatorCreationException;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 
-import javax.crypto.spec.SecretKeySpec;
-
 import java.io.*;
 import java.math.BigInteger;
-import javax.net.ssl.SSLSocket;
+import java.net.Socket;
 import java.security.*;
 import java.security.cert.CertificateEncodingException;
 import java.security.cert.CertificateException;
@@ -28,20 +26,22 @@ public class CertificateAuthority implements Runnable {
     private  X509Certificate[] certs;
     private  PublicKey myPublicKey;
     private  PrivateKey myPrivateKey;
-    private  SSLSocket clientService;
+    private  Socket clientService;
     private  DataInputStream input;
     private  DataOutputStream output;
     private final Object fileLock = new Object();
 
 
-    public CertificateAuthority(SSLSocket clientService, DataInputStream input, DataOutputStream output) {
-        this.clientService = clientService;
+    public CertificateAuthority(Socket clientService, DataInputStream input, DataOutputStream output) {
         this.input = input;
+        this.clientService = clientService;
         this.output = output;
         if (myPrivateKey == null || myPublicKey == null) {
             try {
-                getKeys();
-            } catch (NoSuchAlgorithmException e) {
+                getKeys("CA");
+                System.out.println(input.readUTF());
+                output.writeUTF("Connected");
+            } catch (NoSuchAlgorithmException | IOException e) {
                 throw new RuntimeException(e);
             }
         }
@@ -61,43 +61,17 @@ public class CertificateAuthority implements Runnable {
         }
     }
 
-    private  KeyPair generateAsymKeys(String owner) throws NoSuchAlgorithmException {
-        KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
-        generator.initialize(2048);
-        KeyPair pair = generator.generateKeyPair();
-        PrivateKey privateKey = pair.getPrivate();
-        PublicKey publicKey = pair.getPublic();
-        synchronized (fileLock) {
-            try (FileOutputStream fosPub = new FileOutputStream(owner+".pub")) {
-                fosPub.write(publicKey.getEncoded());
-                fosPub.close();
-                FileOutputStream fosPriv = new FileOutputStream(owner);
-                fosPriv.write(privateKey.getEncoded());
-                fosPriv.close();
-            } catch (IOException e) {
-                throw new RuntimeException(e);
-            }
-        }
-        return pair;
-    }
-
-    private  void getKeys() throws NoSuchAlgorithmException {
-        File myPubKeyFile = new File("CA.pub");
-        File myPrivKeyFile = new File("CA");
+    private  void getKeys(String name) throws NoSuchAlgorithmException {
+        File myPubKeyFile = new File(name+".pub");
+        File myPrivKeyFile = new File(name);
         try {
-            if (myPubKeyFile.exists() && myPrivKeyFile.exists()){
-                byte[] myPubBytes = readAllBytes(myPubKeyFile);
-                byte[] myPrivBytes = readAllBytes(myPrivKeyFile);
-                KeyFactory keyFactory = KeyFactory.getInstance("RSA");
-                EncodedKeySpec myPubKeySpec = new X509EncodedKeySpec(myPubBytes);
-                myPublicKey = keyFactory.generatePublic(myPubKeySpec);
-                EncodedKeySpec myPrivKeySpec = new PKCS8EncodedKeySpec(myPrivBytes);
-                myPrivateKey = keyFactory.generatePrivate(myPrivKeySpec);
-            } else {
-                KeyPair keyPair = generateAsymKeys("Alice");
-                myPrivateKey = keyPair.getPrivate();
-                myPublicKey = keyPair.getPublic();
-            }
+            byte[] myPubBytes = readAllBytes(myPubKeyFile);
+            byte[] myPrivBytes = readAllBytes(myPrivKeyFile);
+            KeyFactory keyFactory = KeyFactory.getInstance("RSA");
+            EncodedKeySpec myPubKeySpec = new X509EncodedKeySpec(myPubBytes);
+            myPublicKey = keyFactory.generatePublic(myPubKeySpec);
+            EncodedKeySpec myPrivKeySpec = new PKCS8EncodedKeySpec(myPrivBytes);
+            myPrivateKey = keyFactory.generatePrivate(myPrivKeySpec);
         } catch (InvalidKeySpecException e) {
             throw new RuntimeException(e);
         }
@@ -152,10 +126,13 @@ public class CertificateAuthority implements Runnable {
             throw new RuntimeException(e);
         } catch (OperatorCreationException e) {
             throw new RuntimeException(e);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
         }
         synchronized (fileLock) {
             try (FileOutputStream fos = new FileOutputStream(client+".pem");) {
                 fos.write(cert.getEncoded());
+                fos.close();
             } catch (FileNotFoundException e) {
                 throw new RuntimeException(e);
             } catch (CertificateEncodingException e) {
@@ -167,14 +144,40 @@ public class CertificateAuthority implements Runnable {
         return cert;
     }
 
+    private String sendFile(String fileName) {
+        System.out.printf("Sending file %s\n", fileName);
+        File file = new File(fileName);
+        try (FileInputStream fileInputStream = new FileInputStream(file)) {
+            int bytesRead = 0;
+            output.writeLong(file.length());
+            // Here we  break file into chunks
+            byte[] buffer = new byte[4 * 1024];
+            while ((bytesRead = fileInputStream.read(buffer)) != -1) {
+                // Send the file to Server Socket
+                output.write(buffer, 0, bytesRead);
+            }
+            output.flush();
+            // close the file here
+            fileInputStream.close();
+            return "client response: " + input.readUTF();
+        } catch (FileNotFoundException e) {
+            throw new RuntimeException(e);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     @Override
     public void run() {
         try {
             while (!clientService.isClosed()){
-                String request = input.readUTF();
+                String request = "";
+                if (input.available()>0)
+                    request = input.readUTF();
                 if (request.equals("Create Certificate")){
+                    System.out.println(sendFile("CA.pem"));
                     String client = input.readUTF();
-                    byte[] digitalSignature = new byte[512];
+                    byte[] digitalSignature = new byte[256];
                     input.read(digitalSignature);
                     byte[] clientKeyBytes = new byte[2048];
                     input.read(clientKeyBytes);
@@ -182,7 +185,19 @@ public class CertificateAuthority implements Runnable {
                     PublicKey clientKey = KeyFactory.getInstance("RSA").generatePublic(myPubKeySpec);
                     Signature signature = Signature.getInstance("SHA256withRSA");
                     signature.initVerify(clientKey);
-                    generateCert(client, clientKey);
+                    signature.update(client.getBytes());
+                    if (signature.verify(digitalSignature)) {
+                        generateCert(client, clientKey);
+                        output.writeBoolean(true);
+                        System.out.println(sendFile(client+".pem"));
+                    }
+                    else output.writeBoolean(false);
+                }
+                else if (request.equals("Requesting Certificate")){
+                    String who = input.readUTF();
+                    sendFile(who+".pem");
+                } else if (request.equals("Disconnected")) {
+                    clientService.close();
                 }
             }
             System.out.println("Client Disconnected");
@@ -191,11 +206,13 @@ public class CertificateAuthority implements Runnable {
             clientService.close();
         } catch (NoSuchAlgorithmException e) {
             throw new RuntimeException(e);
-        } catch (IOException e) {
-            throw new RuntimeException(e);
         } catch (InvalidKeySpecException e) {
             throw new RuntimeException(e);
+        } catch (SignatureException e) {
+            throw new RuntimeException(e);
         } catch (InvalidKeyException e) {
+            throw new RuntimeException(e);
+        } catch (IOException e) {
             throw new RuntimeException(e);
         }
     }
