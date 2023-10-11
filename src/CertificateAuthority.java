@@ -10,44 +10,94 @@ import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 
 import java.io.*;
 import java.math.BigInteger;
-import java.net.Socket;
 import java.security.*;
 import java.security.cert.CertificateEncodingException;
 import java.security.cert.CertificateException;
+import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.security.spec.EncodedKeySpec;
 import java.security.spec.InvalidKeySpecException;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.Date;
+import java.util.HashMap;
+import java.util.Map;
 
-public class CertificateAuthority implements Runnable {
+class CertificateAuthority {
+    private PublicKey myPublicKey;
+    private PrivateKey myPrivateKey;
+    private Map<String, X509Certificate> certs;
+    private static volatile Object lock = new Object();
 
-    private  X509Certificate[] certs;
-    private  PublicKey myPublicKey;
-    private  PrivateKey myPrivateKey;
-    private  Socket clientService;
-    private  DataInputStream input;
-    private  DataOutputStream output;
-    private final Object fileLock = new Object();
+    public CertificateAuthority() throws NoSuchAlgorithmException {
+        certs = new HashMap<>();
+        if (myPrivateKey == null || myPublicKey == null)
+            getKeys("CA");
+    }
 
+    private KeyPair generateAsymKeys(String owner) throws NoSuchAlgorithmException {
+        KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+        generator.initialize(2048);
+        KeyPair pair = generator.generateKeyPair();
+        PrivateKey privateKey = pair.getPrivate();
+        PublicKey publicKey = pair.getPublic();
+        try (FileOutputStream fosPub = new FileOutputStream(owner+".pub")) {
+            fosPub.write(publicKey.getEncoded());
+            fosPub.close();
+            FileOutputStream fosPriv = new FileOutputStream(owner);
+            fosPriv.write(privateKey.getEncoded());
+            fosPriv.close();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+        return pair;
+    }
 
-    public CertificateAuthority(Socket clientService, DataInputStream input, DataOutputStream output) {
-        this.input = input;
-        this.clientService = clientService;
-        this.output = output;
-        if (myPrivateKey == null || myPublicKey == null) {
-            try {
-                getKeys("CA");
-                System.out.println(input.readUTF());
-                output.writeUTF("Connected");
-            } catch (NoSuchAlgorithmException | IOException e) {
+    private void loadCerts() {
+        File folder = new File(".");
+        FilenameFilter pemFilter = (dir, name) -> name.endsWith(".pem");
+        File[] certificateFiles = folder.listFiles(pemFilter);
+        for (File crtFile : certificateFiles) {
+            String name = crtFile.getName();
+            name = name.substring(0, name.length()-4);
+            try (FileInputStream fis = new FileInputStream(crtFile)) {
+                CertificateFactory cf = CertificateFactory.getInstance("X.509");
+                X509Certificate cert = (X509Certificate) cf.generateCertificate(fis);
+                certs.put(name, cert);
+            } catch (FileNotFoundException | CertificateException e) {
+                throw new RuntimeException(e);
+            } catch (IOException e) {
                 throw new RuntimeException(e);
             }
         }
     }
 
-    private synchronized byte[] readAllBytes (File file) {
+    private void getKeys(String name) throws NoSuchAlgorithmException {
+        File caCert = new File(name+".pem");
+        if (!caCert.exists()) {
+            KeyPair kp = generateAsymKeys(name);
+            myPrivateKey = kp.getPrivate();
+            myPublicKey = kp.getPublic();
+            generateCert(name, myPublicKey);
+        } else {
+            File myPubKeyFile = new File(name+".pub");
+            File myPrivKeyFile = new File(name);
+            try {
+                byte[] myPubBytes = readAllBytes(myPubKeyFile);
+                byte[] myPrivBytes = readAllBytes(myPrivKeyFile);
+                KeyFactory keyFactory = KeyFactory.getInstance("RSA");
+                EncodedKeySpec myPubKeySpec = new X509EncodedKeySpec(myPubBytes);
+                myPublicKey = keyFactory.generatePublic(myPubKeySpec);
+                EncodedKeySpec myPrivKeySpec = new PKCS8EncodedKeySpec(myPrivBytes);
+                myPrivateKey = keyFactory.generatePrivate(myPrivKeySpec);
+                loadCerts();
+            } catch (InvalidKeySpecException e) {
+                throw new RuntimeException(e);
+            }
+        }
+    }
+
+    private byte[] readAllBytes (File file) {
         try {
             FileInputStream fis = new FileInputStream(file);
             byte[] fileBytes = new byte[(int) file.length()];
@@ -61,45 +111,20 @@ public class CertificateAuthority implements Runnable {
         }
     }
 
-    private  void getKeys(String name) throws NoSuchAlgorithmException {
-        File myPubKeyFile = new File(name+".pub");
-        File myPrivKeyFile = new File(name);
-        try {
-            byte[] myPubBytes = readAllBytes(myPubKeyFile);
-            byte[] myPrivBytes = readAllBytes(myPrivKeyFile);
-            KeyFactory keyFactory = KeyFactory.getInstance("RSA");
-            EncodedKeySpec myPubKeySpec = new X509EncodedKeySpec(myPubBytes);
-            myPublicKey = keyFactory.generatePublic(myPubKeySpec);
-            EncodedKeySpec myPrivKeySpec = new PKCS8EncodedKeySpec(myPrivBytes);
-            myPrivateKey = keyFactory.generatePrivate(myPrivKeySpec);
-        } catch (InvalidKeySpecException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    private  X509Certificate generateCert(String client, PublicKey clientPK) {
+    public X509Certificate generateCert(String client, PublicKey clientPK) {
         X509Certificate cert;
-        try {
-            // Certificate subject and issuer names
+        if (!certs.containsKey(client)) {
             X500Name subject = new X500Name("CN="+client);
             X500Name issuer = new X500Name(
                     "CN=CA," +
                             "O=Certificate Authority"
             );
-
-            // Certificate serial number
             BigInteger serialNumber = BigInteger.valueOf(System.currentTimeMillis());
-
             Date notValidBefore = new Date();
             Date notValidAfter = new Date(notValidBefore.getTime() + 365 * 24 * 60 * 60 * 1000L); // 1 year validity
-
-            // Key usage and extended key usage
             KeyUsage keyUsage = new KeyUsage(KeyUsage.digitalSignature | KeyUsage.keyEncipherment);
             ExtendedKeyUsage extendedKeyUsage = new ExtendedKeyUsage(KeyPurposeId.id_kp_serverAuth);
-
             BasicConstraints basicConstraints = new BasicConstraints(true);
-
-            // Create an X509v3 certificate builder
             X509v3CertificateBuilder certBuilder = new X509v3CertificateBuilder(
                     issuer,
                     serialNumber,
@@ -108,112 +133,42 @@ public class CertificateAuthority implements Runnable {
                     subject,
                     SubjectPublicKeyInfo.getInstance(clientPK.getEncoded())
             );
-
-            // Set extensions
-            certBuilder.addExtension(org.bouncycastle.asn1.x509.Extension.keyUsage, true, keyUsage);
-            certBuilder.addExtension(org.bouncycastle.asn1.x509.Extension.extendedKeyUsage, false, extendedKeyUsage);
-            certBuilder.addExtension(Extension.basicConstraints, true, basicConstraints);
-
-            // Sign the certificate with the private key
-            ContentSigner signer = new JcaContentSignerBuilder("SHA256WithRSA").build(myPrivateKey);
-            X509CertificateHolder certificateHolder = certBuilder.build(signer);
-
-            // Convert the certificate holder to an X509Certificate
-            cert = new JcaX509CertificateConverter().getCertificate(certificateHolder);
-        } catch (CertificateException e) {
-            throw new RuntimeException(e);
-        } catch (CertIOException e) {
-            throw new RuntimeException(e);
-        } catch (OperatorCreationException e) {
-            throw new RuntimeException(e);
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
-        synchronized (fileLock) {
-            try (FileOutputStream fos = new FileOutputStream(client+".pem");) {
-                fos.write(cert.getEncoded());
-                fos.close();
-            } catch (FileNotFoundException e) {
+            try {
+                certBuilder.addExtension(org.bouncycastle.asn1.x509.Extension.keyUsage, true, keyUsage);
+                certBuilder.addExtension(org.bouncycastle.asn1.x509.Extension.extendedKeyUsage, false, extendedKeyUsage);
+                certBuilder.addExtension(Extension.basicConstraints, true, basicConstraints);
+                // Sign the certificate with the private key
+                ContentSigner signer = new JcaContentSignerBuilder("SHA256WithRSA").build(myPrivateKey);
+                X509CertificateHolder certificateHolder = certBuilder.build(signer);
+                cert = new JcaX509CertificateConverter().getCertificate(certificateHolder);
+                synchronized (lock) {
+                    FileOutputStream fos = new FileOutputStream(client+".pem");
+                    fos.write(cert.getEncoded());
+                    certs.put(client, cert);
+                }
+            } catch (CertificateException e) {
                 throw new RuntimeException(e);
-            } catch (CertificateEncodingException e) {
+            } catch (CertIOException e) {
+                throw new RuntimeException(e);
+            } catch (OperatorCreationException e) {
                 throw new RuntimeException(e);
             } catch (IOException e) {
                 throw new RuntimeException(e);
             }
+        } else {
+            System.out.println("Certificate Already Exists!");
+            cert = certs.get(client);
         }
         return cert;
     }
 
-    private String sendFile(String fileName) {
-        System.out.printf("Sending file %s\n", fileName);
-        File file = new File(fileName);
-        try (FileInputStream fileInputStream = new FileInputStream(file)) {
-            int bytesRead = 0;
-            output.writeLong(file.length());
-            // Here we  break file into chunks
-            byte[] buffer = new byte[4 * 1024];
-            while ((bytesRead = fileInputStream.read(buffer)) != -1) {
-                // Send the file to Server Socket
-                output.write(buffer, 0, bytesRead);
-            }
-            output.flush();
-            // close the file here
-            fileInputStream.close();
-            return "client response: " + input.readUTF();
-        } catch (FileNotFoundException e) {
-            throw new RuntimeException(e);
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
+    public synchronized boolean exists(String name) {
+        return certs.containsKey(name);
     }
 
-    @Override
-    public void run() {
-        try {
-            while (!clientService.isClosed()){
-                String request = "";
-                if (input.available()>0)
-                    request = input.readUTF();
-                if (request.equals("Create Certificate")){
-                    System.out.println(sendFile("CA.pem"));
-                    String client = input.readUTF();
-                    byte[] digitalSignature = new byte[256];
-                    input.read(digitalSignature);
-                    byte[] clientKeyBytes = new byte[2048];
-                    input.read(clientKeyBytes);
-                    EncodedKeySpec myPubKeySpec = new X509EncodedKeySpec(clientKeyBytes);
-                    PublicKey clientKey = KeyFactory.getInstance("RSA").generatePublic(myPubKeySpec);
-                    Signature signature = Signature.getInstance("SHA256withRSA");
-                    signature.initVerify(clientKey);
-                    signature.update(client.getBytes());
-                    if (signature.verify(digitalSignature)) {
-                        generateCert(client, clientKey);
-                        output.writeBoolean(true);
-                        System.out.println(sendFile(client+".pem"));
-                    }
-                    else output.writeBoolean(false);
-                }
-                else if (request.equals("Requesting Certificate")){
-                    String who = input.readUTF();
-                    sendFile(who+".pem");
-                } else if (request.equals("Disconnected")) {
-                    clientService.close();
-                }
-            }
-            System.out.println("Client Disconnected");
-            output.close();
-            input.close();
-            clientService.close();
-        } catch (NoSuchAlgorithmException e) {
-            throw new RuntimeException(e);
-        } catch (InvalidKeySpecException e) {
-            throw new RuntimeException(e);
-        } catch (SignatureException e) {
-            throw new RuntimeException(e);
-        } catch (InvalidKeyException e) {
-            throw new RuntimeException(e);
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
+    public synchronized String[] certList() {
+        int len = certs.size();
+        return certs.keySet().toArray(new String[len]);
     }
+
 }
