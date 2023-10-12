@@ -110,7 +110,7 @@ public class Client {
                 output.writeUTF("Certificate Signing Request");
                 Client.output.writeUTF(receiveFile("CA.pem"));
                 caPublicKey = getKeyFromCert("CA");
-                System.out.println("Certificate Signing Request");
+                System.out.println("Sending Certificate Signing Request");
                 output.writeUTF(name);
                 output.write(signature.sign());
                 output.write(myPublicKey.getEncoded());
@@ -122,11 +122,12 @@ public class Client {
                     input.close(); output.close(); caClient.close();
                     getKeys(name);
                 }
+                System.out.println("Approved");
                 Client.output.writeUTF(receiveFile(name+".pem"));
                 output.writeUTF("Disconnected");
                 caClient.shutdownInput(); caClient.shutdownOutput();
                 input.close(); output.close(); caClient.close();
-                System.out.println("Disconnected");
+                System.out.println("Disconnected From CA Server");
             }
         } catch (InvalidKeySpecException e) {
             throw new RuntimeException(e);
@@ -529,8 +530,10 @@ public class Client {
                 System.out.println("Enter the name (case-sensitive) to contact them" +
                         " or type \"quit\" and hit enter to exit");
             }
+            output.writeUTF("Disconnected");
             caClient.shutdownInput(); caClient.shutdownOutput();
             input.close(); output.close(); caClient.close();
+            System.out.println("Disconnected From CA Server");
             return found;
         } catch (UnknownHostException e) {
             throw new RuntimeException(e);
@@ -543,10 +546,10 @@ public class Client {
         Scanner consoleIn = new Scanner(System.in);
         System.out.println("What's your name?");
         String myName = consoleIn.nextLine().strip();
+        if (myPrivateKey == null || myPublicKey == null) getKeys(myName);
         System.out.println("Who do you want to contact?");
         String otherName = consoleIn.nextLine().strip();
 //        try {
-        if (myPrivateKey == null || myPublicKey == null) getKeys(myName);
         if (otherPublicKey == null) {
             while (!connect(myName, otherName)){
                 otherName = consoleIn.nextLine().strip();

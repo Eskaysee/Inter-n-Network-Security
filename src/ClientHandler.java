@@ -26,7 +26,7 @@ public class ClientHandler implements Runnable {
         this.certAuth = ca;
         try {
             System.out.println(input.readUTF());
-            output.writeUTF("Connected");
+            output.writeUTF("Connected to Certificate Authority Server");
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
@@ -109,7 +109,6 @@ public class ClientHandler implements Runnable {
                         String[] people = certAuth.certList();
                         output.writeInt(people.length);
                         for (String person : people) output.writeUTF(person);
-                        //output.write();
                     }
                 } else if (request.equals("Disconnected")) {
                     clientService.close();
