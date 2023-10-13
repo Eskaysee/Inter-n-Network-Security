@@ -3,6 +3,7 @@ import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 import java.io.*;
 import java.net.SocketException;
+import java.net.SocketTimeoutException;
 import java.security.*;
 import java.security.cert.*;
 import java.security.cert.Certificate;
@@ -705,6 +706,8 @@ public class Client {
                         MyClient.close();
                     } catch (SocketException e) {
                         throw new RuntimeException(e);
+                    } catch (SocketTimeoutException e){
+                        System.out.println("Sender took far too long");
                     } catch (IOException e) {
                         throw new RuntimeException(e);
                     }
