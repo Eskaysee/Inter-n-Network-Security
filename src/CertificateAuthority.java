@@ -1,9 +1,11 @@
+import org.bouncycastle.asn1.DERSequence;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.asn1.x509.*;
 import org.bouncycastle.cert.CertIOException;
 import org.bouncycastle.cert.X509CertificateHolder;
 import org.bouncycastle.cert.X509v3CertificateBuilder;
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
+import org.bouncycastle.oer.its.ieee1609dot2.IssuerIdentifier;
 import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.OperatorCreationException;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
@@ -26,8 +28,8 @@ import java.util.Map;
 class CertificateAuthority {
     private PublicKey myPublicKey;
     private PrivateKey myPrivateKey;
-    private Map<String, X509Certificate> certs;
-    private static volatile Object lock = new Object();
+    private volatile Map<String, X509Certificate> certs;
+    private static final Object lock = new Object();
 
     public CertificateAuthority() throws NoSuchAlgorithmException {
         certs = new HashMap<>();
@@ -63,7 +65,8 @@ class CertificateAuthority {
             try (FileInputStream fis = new FileInputStream(crtFile)) {
                 CertificateFactory cf = CertificateFactory.getInstance("X.509");
                 X509Certificate cert = (X509Certificate) cf.generateCertificate(fis);
-                certs.put(name, cert);
+                if (cert.getNotAfter().after(new Date()))
+                    certs.put(name, cert);  //VALID
             } catch (FileNotFoundException | CertificateException e) {
                 throw new RuntimeException(e);
             } catch (IOException e) {
@@ -123,8 +126,16 @@ class CertificateAuthority {
             Date notValidBefore = new Date();
             Date notValidAfter = new Date(notValidBefore.getTime() + 365 * 24 * 60 * 60 * 1000L); // 1 year validity
             KeyUsage keyUsage = new KeyUsage(KeyUsage.digitalSignature | KeyUsage.keyEncipherment);
-            ExtendedKeyUsage extendedKeyUsage = new ExtendedKeyUsage(KeyPurposeId.id_kp_serverAuth);
-            BasicConstraints basicConstraints = new BasicConstraints(true);
+            BasicConstraints basicConstraints;
+            ExtendedKeyUsage extendedKeyUsage;
+            if (client.equalsIgnoreCase("CA")) {
+                basicConstraints = new BasicConstraints(true);
+                extendedKeyUsage = new ExtendedKeyUsage(KeyPurposeId.id_kp_serverAuth);
+            }
+            else {
+                basicConstraints = new BasicConstraints(false);
+                extendedKeyUsage = new ExtendedKeyUsage(KeyPurposeId.id_kp_clientAuth);
+            }
             X509v3CertificateBuilder certBuilder = new X509v3CertificateBuilder(
                     issuer,
                     serialNumber,
@@ -133,10 +144,19 @@ class CertificateAuthority {
                     subject,
                     SubjectPublicKeyInfo.getInstance(clientPK.getEncoded())
             );
+            certBuilder.setIssuerUniqueID(new boolean[]{true,false,true,true,false});
             try {
                 certBuilder.addExtension(org.bouncycastle.asn1.x509.Extension.keyUsage, true, keyUsage);
-                certBuilder.addExtension(org.bouncycastle.asn1.x509.Extension.extendedKeyUsage, false, extendedKeyUsage);
-                certBuilder.addExtension(Extension.basicConstraints, true, basicConstraints);
+                DERSequence san;
+                if (client.equalsIgnoreCase("CA")) {
+                    san = new DERSequence(new GeneralName(GeneralName.iPAddress, "192.168.1.59"));
+                    certBuilder.addExtension(Extension.basicConstraints, true, basicConstraints);
+                } else {
+                    san = new DERSequence(new GeneralName(GeneralName.dNSName, "localhost"));
+                    certBuilder.addExtension(Extension.basicConstraints, false, basicConstraints);
+                }
+                certBuilder.addExtension(Extension.subjectAlternativeName, false,san);
+                certBuilder.addExtension(Extension.extendedKeyUsage, true, extendedKeyUsage);
                 // Sign the certificate with the private key
                 ContentSigner signer = new JcaContentSignerBuilder("SHA256WithRSA").build(myPrivateKey);
                 X509CertificateHolder certificateHolder = certBuilder.build(signer);
@@ -156,8 +176,14 @@ class CertificateAuthority {
                 throw new RuntimeException(e);
             }
         } else {
-            System.out.println("Certificate Already Exists!");
-            cert = certs.get(client);
+            cert = certs.get(client); //Certs is the list of valid certificates
+            if (cert.getNotAfter().after(new Date())) //checking if the certificate is expired
+                System.out.println("Certificate Already Exists!");
+            else {
+                new File(client+".pem").delete();
+                certs.remove(client);
+                cert = generateCert(client, clientPK);
+            }
         }
         return cert;
     }

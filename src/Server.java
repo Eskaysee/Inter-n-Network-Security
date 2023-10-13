@@ -1,22 +1,10 @@
-import org.bouncycastle.asn1.x500.X500Name;
-import org.bouncycastle.asn1.x509.*;
-import org.bouncycastle.cert.CertIOException;
-import org.bouncycastle.cert.X509CertificateHolder;
-import org.bouncycastle.cert.X509v3CertificateBuilder;
-import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
-import org.bouncycastle.operator.ContentSigner;
-import org.bouncycastle.operator.OperatorCreationException;
-import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
-
-import java.io.*;
-import java.math.BigInteger;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.security.*;
-import java.security.cert.CertificateEncodingException;
-import java.security.cert.CertificateException;
-import java.security.cert.X509Certificate;
-import java.util.Date;
+
 
 public class Server {
 
@@ -26,8 +14,6 @@ public class Server {
         final CertificateAuthority ca = new CertificateAuthority();
         try {
             MyService = new ServerSocket(8820);
-//            SSLServerSocketFactory serverSocketFactory = (SSLServerSocketFactory) SSLServerSocketFactory.getDefault();
-//            MyService = (SSLServerSocket) serverSocketFactory.createServerSocket(8820);
             System.out.println("Server is running");
             while (true) {
                 Socket clientService = MyService.accept();

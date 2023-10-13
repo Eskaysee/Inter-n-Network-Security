@@ -2,14 +2,16 @@ import javax.crypto.*;
 import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 import java.io.*;
+import java.net.SocketException;
 import java.security.*;
 import java.security.cert.*;
+import java.security.cert.Certificate;
 import java.security.spec.EncodedKeySpec;
 import java.security.spec.InvalidKeySpecException;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.net.Socket;
-import javax.net.ssl.SSLSocket;
+import javax.net.ssl.*;
 import java.net.UnknownHostException;
 import java.util.Base64;
 import java.util.Scanner;
@@ -20,6 +22,7 @@ import java.util.zip.ZipOutputStream;
 public class Client {
 
     private static SSLSocket MyClient;
+    private static SSLServerSocket MyService;
     private static DataInputStream input;
     private static DataOutputStream output;
 
@@ -35,7 +38,7 @@ public class Client {
         new SecureRandom().nextBytes(iv);
         return new IvParameterSpec(iv);
     }
-    
+
     private static byte[] readAllBytes (File file) {
         try {
             FileInputStream fis = new FileInputStream(file);
@@ -67,7 +70,7 @@ public class Client {
         }
         return pair;
     }
-    
+
     private static SecretKey generateSymKeys(String name1, String name2) throws NoSuchAlgorithmException {
         KeyGenerator generator = KeyGenerator.getInstance("AES");
         generator.init(128);
@@ -79,7 +82,7 @@ public class Client {
         }
         return symKey;
     }
-    
+
     private static void getKeys(String name) throws NoSuchAlgorithmException {
         File myPubKeyFile = new File(name+".pub");
         File myPrivKeyFile = new File(name);
@@ -92,7 +95,7 @@ public class Client {
                 myPublicKey = keyFactory.generatePublic(myPubKeySpec);
                 EncodedKeySpec myPrivKeySpec = new PKCS8EncodedKeySpec(myPrivBytes);
                 myPrivateKey = keyFactory.generatePrivate(myPrivKeySpec);
-                caPublicKey = getKeyFromCert("CA");
+                caPublicKey = getKeyFromCert(name,"CA");
             } else {
                 KeyPair keyPair = generateAsymKeys(name);
                 myPrivateKey = keyPair.getPrivate();
@@ -109,7 +112,7 @@ public class Client {
 
                 output.writeUTF("Certificate Signing Request");
                 Client.output.writeUTF(receiveFile("CA.pem"));
-                caPublicKey = getKeyFromCert("CA");
+                caPublicKey = getKeyFromCert(name,"CA");
                 System.out.println("Sending Certificate Signing Request");
                 output.writeUTF(name);
                 output.write(signature.sign());
@@ -142,21 +145,46 @@ public class Client {
         }
     }
 
-    private static PublicKey getKeyFromCert(String name) throws NoSuchAlgorithmException {
+    private static X509Certificate loadCert(String name) {
         try (FileInputStream fis = new FileInputStream(name+".pem")) {
             CertificateFactory cf = CertificateFactory.getInstance("X.509");
+            return (X509Certificate) cf.generateCertificate(fis);
+        } catch (CertificateException | FileNotFoundException e) {
+            throw new RuntimeException(e);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static PublicKey getKeyFromCert(String name, String other) throws NoSuchAlgorithmException {
+        try (FileInputStream fis = new FileInputStream(other+".pem")) {
+            CertificateFactory cf = CertificateFactory.getInstance("X.509");
             X509Certificate cert = (X509Certificate) cf.generateCertificate(fis);
+            cert.checkValidity();
             if (caPublicKey != null) cert.verify(caPublicKey);
             return cert.getPublicKey();
         } catch (FileNotFoundException e) {
-            throw new RuntimeException(e);
-        } catch (CertificateException e) {
-            System.out.println("Faulty Certificate");
-            throw new RuntimeException(e);
+            System.out.println("Don't have "+other+"'s Certificate.");
+            System.out.println("Checking with the Certificate Authority...");
+            if (requestOthersKey(name, other)) return otherPublicKey;
+            else return null;
+        } catch (CertificateNotYetValidException e) {
+            System.out.println("Certificate isn't valid yet");
+            return null;
+        } catch (CertificateExpiredException e) {
+            System.out.println("Certificate is expired checking the Certificate Authority for an updated version");
+            if (requestOthersKey(name, other)) return otherPublicKey;
+            else return null;
         } catch (SignatureException | InvalidKeyException e) {
-            System.out.println("Not From the Certificate Authority!");
-            System.out.println("Closing the Program while we Investigate");
-            throw new RuntimeException(e);
+            System.out.println("Certificate Isn't From the Certificate Authority!");
+            return null;
+        } catch (CertificateException e) {
+            System.out.println("Faulty Certificate (Corrupted)");
+            File file = new File(other+".pem");
+            file.delete();
+            System.out.println("Deleting the stored certificate and requesting from Certificate Authority");
+            if (requestOthersKey(name, other)) return otherPublicKey;
+            else return null;
         } catch (IOException | NoSuchProviderException e) {
             throw new RuntimeException(e);
         }
@@ -255,14 +283,14 @@ public class Client {
         }
     }
 
-    private static void encrypt(SecretKey sessionKey, PublicKey otherPublicKey) throws NoSuchAlgorithmException {
+    private static void encrypt(SecretKey sessionKey, PublicKey otherPublicKey, String seshKeyFileName) throws NoSuchAlgorithmException {
         Cipher cipher = null;
         try {
             cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding");
             cipher.init(Cipher.ENCRYPT_MODE, otherPublicKey);
             byte[] encryptedSK = cipher.doFinal(sessionKey.getEncoded());
             //Overwrite the zip file
-            FileOutputStream  stream = new FileOutputStream("session.key");
+            FileOutputStream  stream = new FileOutputStream(seshKeyFileName);
             stream.write(encryptedSK);
             stream.close();
         } catch (BadPaddingException | NoSuchPaddingException e) {
@@ -319,9 +347,72 @@ public class Client {
         compressFiles(new String[]{dir.getName()+"/Image Hash.txt",dir.getName()+"/First Contact.txt"}, dir.getName()+".zip");
         File zip1stContact = new File(dir.getName()+".zip");
         encrypt(zip1stContact, sessionKey, iv);
-        encrypt(sessionKey, otherPublicKey);
+        encrypt(sessionKey, otherPublicKey, from+to+"Session.key");
         String ivAsString = Base64.getEncoder().encodeToString(iv.getIV());
-        sendFile(from+to+"Session.key");
+//        sendFile(from+to+"Session.key");
+
+        ///
+        SSLContext ctx = getSSLContext(from);
+        System.setProperty("javax.net.ssl.keyStore", from+"keystore.jks");
+        System.setProperty("javax.net.ssl.trustStore", "CAtruststore.jks");
+        try {
+            SSLSocketFactory sslSocketFactory =  ctx.getSocketFactory();
+            MyClient = (SSLSocket) sslSocketFactory.createSocket("localhost", 8200);
+            input = new DataInputStream(MyClient.getInputStream());
+            output = new DataOutputStream(MyClient.getOutputStream());
+
+            System.out.println();
+            output.writeUTF("Connected");
+            System.out.println(to+" response: "+input.readUTF());
+
+            System.out.println(to+" response: "+input.readUTF());
+            output.writeUTF("Disconnecting");
+            System.out.println();
+
+            MyClient.shutdownInput();
+            MyClient.shutdownOutput();
+            input.close();
+            output.close();
+            MyClient.close();
+        } catch (UnknownHostException e) {
+            throw new RuntimeException(e);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static SSLContext getSSLContext(String myName) throws NoSuchAlgorithmException {
+        SSLContext ctx = SSLContext.getInstance("TLS");
+        KeyManagerFactory kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+        TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+        try {
+            KeyStore ks = KeyStore.getInstance("JKS");
+            KeyStore trustStore = KeyStore.getInstance("JKS");
+            ks.load(null,null);
+            trustStore.load(null,null);
+            X509Certificate myCert = loadCert(myName);
+            ks.setKeyEntry(myName, myPrivateKey, "".toCharArray(), new Certificate[]{myCert, loadCert("CA")});
+            trustStore.setCertificateEntry("CA", loadCert("CA"));
+            ks.setCertificateEntry("CA", loadCert("CA"));
+            FileOutputStream keyStore = new FileOutputStream(myName+"keystore.jks");
+            ks.store(keyStore,"".toCharArray());
+            FileOutputStream trustCAStore = new FileOutputStream("CAtruststore.jks");
+            trustStore.store(trustCAStore, "".toCharArray());
+            kmf.init(ks, "".toCharArray());
+            tmf.init(trustStore);
+            ctx.init(kmf.getKeyManagers(), tmf.getTrustManagers(), null);
+        } catch (KeyStoreException e) {
+            throw new RuntimeException(e);
+        } catch (UnrecoverableKeyException e) {
+            throw new RuntimeException(e);
+        } catch (CertificateException e) {
+            throw new RuntimeException(e);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        } catch (KeyManagementException e) {
+            throw new RuntimeException(e);
+        }
+        return ctx;
     }
 
     //receive
@@ -345,7 +436,7 @@ public class Client {
             throw new RuntimeException(e);
         }
     }
-    
+
     private static void decrypt(String encryptedSKname, PrivateKey bPrivateKey) throws NoSuchAlgorithmException {
         File encryptedSK= new File(encryptedSKname);
         byte[] skBytes = readAllBytes(encryptedSK);
@@ -480,20 +571,19 @@ public class Client {
         File seshKeyFile = new File(from+to+"Session.key");
         File seshKeyFileAlt = new File(to+from+"Session.key");
         boolean firstContact = false;
-        if (otherCertFile.exists()) {
-            otherPublicKey = getKeyFromCert(to);
-            if (seshKeyFile.exists()){
-                byte[] seshBytes = readAllBytes(seshKeyFile);
-                sessionKey = new SecretKeySpec(seshBytes, "AES");
-            } else if (seshKeyFileAlt.exists()) {
-                byte[] seshBytes = readAllBytes(seshKeyFileAlt);
-                sessionKey = new SecretKeySpec(seshBytes, "AES");
-            } else {
-                sessionKey = generateSymKeys(from, to);
-                firstContact = true;
-            }
+        otherPublicKey = getKeyFromCert(from, to);
+        if (otherPublicKey==null) {
+            System.out.println("Enter another name to contact or...\n" +
+                    "Type \"menu\" and hit enter to return to the main menu");
+            return false;
+        }
+        if (seshKeyFile.exists()){
+            byte[] seshBytes = readAllBytes(seshKeyFile);
+            sessionKey = new SecretKeySpec(seshBytes, "AES");
+        } else if (seshKeyFileAlt.exists()) {
+            byte[] seshBytes = readAllBytes(seshKeyFileAlt);
+            sessionKey = new SecretKeySpec(seshBytes, "AES");
         } else {
-            if (!requestOthersKey(from, to)) return false;
             sessionKey = generateSymKeys(from, to);
             firstContact = true;
         }
@@ -516,7 +606,7 @@ public class Client {
             boolean found = input.readBoolean();
             if (found) {
                 Client.output.writeUTF(receiveFile(other+".pem"));
-                otherPublicKey = getKeyFromCert(name);
+                otherPublicKey = getKeyFromCert(name, other);
             }
             else {
                 System.out.println("Certificate doesn't exist!");
@@ -527,8 +617,6 @@ public class Client {
                     if (!person.equals("CA")&&!person.equals(name))
                         System.out.println(person);
                 }
-                System.out.println("Enter the name (case-sensitive) to contact them" +
-                        " or type \"quit\" and hit enter to exit");
             }
             output.writeUTF("Disconnected");
             caClient.shutdownInput(); caClient.shutdownOutput();
@@ -544,40 +632,86 @@ public class Client {
 
     public static void main(String[] args) throws NoSuchAlgorithmException {
         Scanner consoleIn = new Scanner(System.in);
+        boolean running = true;
         System.out.println("What's your name?");
         String myName = consoleIn.nextLine().strip();
         if (myPrivateKey == null || myPublicKey == null) getKeys(myName);
-        System.out.println("Who do you want to contact?");
-        String otherName = consoleIn.nextLine().strip();
-//        try {
-        if (otherPublicKey == null) {
-            while (!connect(myName, otherName)){
-                otherName = consoleIn.nextLine().strip();
-                if (otherName.equalsIgnoreCase("quit")) return;
+        System.out.println();
+        do {
+            System.out.println("What do you want to do?\nEnter the corresponding number:\n" +
+                    "1. Contact Someone\n" +
+                    "2. Wait (2 mins) to be Contacted\n" +
+                    "3. Quit");
+            int response = consoleIn.nextInt();
+            consoleIn.nextLine();
+            switch (response) {
+                case 1: {
+                    System.out.println("Who do you want to contact?");
+                    String otherName = consoleIn.nextLine().strip();
+                    if (otherPublicKey == null) {
+                        while (!connect(myName, otherName)) {
+                            otherName = consoleIn.nextLine().strip();
+                            if (otherName.equalsIgnoreCase("menu")) break;
+                            otherName = otherName.substring(0, 1).toUpperCase() + otherName.substring(1).toLowerCase();
+                        }
+                    }
+                    if (otherName.equalsIgnoreCase("menu")) {
+                        System.out.println();
+                        break;
+                    }
+                    ///Send or request
+                    break;
+                }
+                case 2: {
+                    System.out.println("Who are you expecting contact from?");
+                    String otherName = consoleIn.nextLine().strip();
+                    otherPublicKey = getKeyFromCert(myName, otherName);
+                    while (otherPublicKey == null) {
+                        System.out.println("Enter another name to contact them\n" +
+                                "or type \"menu\" and hit enter to return to the main menu");
+                        otherName = consoleIn.nextLine().strip();
+                        if (otherName.equalsIgnoreCase("menu")) break;
+                        otherPublicKey = getKeyFromCert(myName, otherName);
+                    }
+                    if (otherName.equalsIgnoreCase("menu")) {
+                        System.out.println();
+                        break;
+                    }
+
+                    SSLContext ctx = getSSLContext(myName);
+                    System.setProperty("javax.net.ssl.keyStore", myName+"keystore.jks");
+                    System.setProperty("javax.net.ssl.trustStore", "CAtruststore.jks");
+                    try {
+                        SSLServerSocketFactory serverSocketFactory = ctx.getServerSocketFactory();
+                        MyService = (SSLServerSocket) serverSocketFactory.createServerSocket(8200);
+                        MyService.setSoTimeout(2*60*1000);
+                        MyClient = (SSLSocket) MyService.accept();
+                        input = new DataInputStream(MyClient.getInputStream());
+                        output = new DataOutputStream(MyClient.getOutputStream());
+
+                        System.out.println();
+                        System.out.println(otherName+" response: "+input.readUTF());
+                        output.writeUTF("Connected");
+
+                        output.writeUTF("Disconnecting");
+                        System.out.println(otherName+" response: "+input.readUTF());
+                        System.out.println();
+
+//                        while (!MyClient.isClosed()){
+//                            String request = input.readUTF();
+//                        }
+                        input.close();
+                        output.close();
+                        MyClient.close();
+                    } catch (SocketException e) {
+                        throw new RuntimeException(e);
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
+                    }
+                }
+                case 3:
+                    running = false;
             }
-        }
-//            final IvParameterSpec iv = generateIv();
-            //Connect to Bob
-//            SSLSocketFactory sslSocketFactory = (SSLSocketFactory) SSLSocketFactory.getDefault();
-//            MyClient = (SSLSocket) sslSocketFactory.createSocket("localhost", 8200); //machine IP & Port number for service > 1023
-//            //CONFIGURATIONS
-//            MyClient.startHandshake();
-//            input = new DataInputStream(MyClient.getInputStream());
-//            output = new DataOutputStream(MyClient.getOutputStream());
-//
-//            if (otherPublicKey == null) {
-//                establishComms(myName, "Bob");
-//            }
-//
-//            MyClient.shutdownInput();
-//            MyClient.shutdownOutput();
-//            input.close();
-//            output.close();
-//            MyClient.close();
-//        } catch (UnknownHostException e) {
-//            throw new RuntimeException(e);
-//        } catch (IOException e) {
-//            throw new RuntimeException(e);
-//        }
+        } while (running);
     }
 }
