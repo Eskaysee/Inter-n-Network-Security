@@ -147,15 +147,11 @@ class CertificateAuthority {
             certBuilder.setIssuerUniqueID(new boolean[]{true,false,true,true,false});
             try {
                 certBuilder.addExtension(org.bouncycastle.asn1.x509.Extension.keyUsage, true, keyUsage);
-                DERSequence san;
                 if (client.equalsIgnoreCase("CA")) {
-                    san = new DERSequence(new GeneralName(GeneralName.iPAddress, "192.168.1.59"));
                     certBuilder.addExtension(Extension.basicConstraints, true, basicConstraints);
                 } else {
-                    san = new DERSequence(new GeneralName(GeneralName.dNSName, "localhost"));
                     certBuilder.addExtension(Extension.basicConstraints, false, basicConstraints);
                 }
-                certBuilder.addExtension(Extension.subjectAlternativeName, false,san);
                 certBuilder.addExtension(Extension.extendedKeyUsage, true, extendedKeyUsage);
                 // Sign the certificate with the private key
                 ContentSigner signer = new JcaContentSignerBuilder("SHA256WithRSA").build(myPrivateKey);

@@ -95,21 +95,6 @@ public class ClientHandler implements Runnable {
                         System.out.println(sendFile(client+".pem"));
                     }
                     else output.writeBoolean(false);
-                }
-                else if (request.equals("Requesting Certificate")){
-                    String person1 = input.readUTF();
-                    String person2 = input.readUTF();
-                    System.out.println(person1+" Requesting "+person2+"'s Certificate");
-                    if (certAuth.exists(person2)) {
-                        output.writeBoolean(true);
-                        System.out.println(sendFile(person2+".pem"));
-                    } else {
-                        output.writeBoolean(false);
-                        System.out.println("Certificate doesn't exist!");
-                        String[] people = certAuth.certList();
-                        output.writeInt(people.length);
-                        for (String person : people) output.writeUTF(person);
-                    }
                 } else if (request.equals("Disconnected")) {
                     clientService.close();
                 }
