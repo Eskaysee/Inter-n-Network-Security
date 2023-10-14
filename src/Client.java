@@ -128,13 +128,11 @@ public class Client {
                 input.close(); output.close(); MyClient.close();
                 System.out.println("Disconnected From CA Server");
             }
-        } catch (InvalidKeySpecException e) {
+        } catch (InvalidKeySpecException | InvalidKeyException e) {
             throw new RuntimeException(e);
         } catch (UnknownHostException e) {
             throw new RuntimeException(e);
         } catch (SignatureException e) {
-            throw new RuntimeException(e);
-        } catch (InvalidKeyException e) {
             throw new RuntimeException(e);
         } catch (IOException e) {
             throw new RuntimeException(e);
@@ -356,9 +354,10 @@ public class Client {
         encrypt(zip1stContact, iv);
         encrypt(from+to+"Session.key");
         System.out.println(sendFile(from+to+"Session.key"));
-        try {
+        try (FileOutputStream fos = new FileOutputStream(from+to+"Session.key")){
             output.writeUTF(Base64.getEncoder().encodeToString(iv.getIV()));
             System.out.println(sendFile(dir.getName()+".zip"));
+            fos.write(sessionKey.getEncoded());
             return input.readBoolean();
         } catch (IOException e) {
             throw new RuntimeException(e);
@@ -588,6 +587,7 @@ public class Client {
             decompressFiles(sesh);
             boolean auth = verifySender(sesh+"/Session Hash.txt", otherPublicKey);
             boolean integrity = compareHash(sesh, "Session.txt");
+            cleanUpImagesFolder();
             if (!(auth && integrity)) {
                 System.out.println("Authentication: " + auth);
                 System.out.println("Integrity? " + integrity);
@@ -599,6 +599,13 @@ public class Client {
         }
         System.out.println("Handshake Complete!");
         return true;
+    }
+
+    private static void cleanUpImagesFolder() {
+        FilenameFilter textFilter = (dir, name) -> name.endsWith(".txt");
+        File[] textFiles = new File("Images").listFiles(textFilter);
+        for (File textfile : textFiles)
+            textfile.delete();
     }
 
     private static void connectedMenu() {
@@ -641,7 +648,11 @@ public class Client {
                             System.out.println("Integrity compromised: Message has been altered. Ending session");
                             break;
                         }
-                    } else if (resp == 3) break;
+                        cleanUpImagesFolder();
+                    } else if (resp == 3) {
+                        output.writeInt(3);
+                        break;
+                    }
                     Thread.sleep(8000);
                 }
 
@@ -653,8 +664,10 @@ public class Client {
                     imageName = input.readUTF();
                     if (!compareHash("Images", imageName)) {
                         System.out.println("Integrity compromised: Message has been altered. Ending session");
+                        resp = 3; output.writeInt(3);
                         break;
                     }
+                    cleanUpImagesFolder();
                 } else if (request == 2) {
                     String picsMenu = "";
                     File[] pics = new File("Images").listFiles();
@@ -699,7 +712,7 @@ public class Client {
         do {
             System.out.println("What do you want to do?\nEnter the corresponding number:\n" +
                     "1. Contact Someone\n" +
-                    "2. Wait (1 min) to be Contacted\n" +
+                    "2. Wait (45 secs) to be Contacted\n" +
                     "3. Quit");
             int response = consoleIn.nextInt();
             consoleIn.nextLine();
@@ -732,7 +745,7 @@ public class Client {
                             System.out.println();
                         } else System.out.println("Handshake Failed!");
 
-                        iv = null;
+                        iv = null; sessionKey = null;
                         MyClient.shutdownInput();
                         MyClient.shutdownOutput();
                         input.close();
@@ -740,6 +753,8 @@ public class Client {
                         MyClient.close();
                     } catch (UnknownHostException e) {
                         throw new RuntimeException(e);
+                    } catch (ConnectException e) {
+                      System.out.println(otherName+" Unavailable. Try again later");
                     } catch (IOException e) {
                         throw new RuntimeException(e);
                     }
@@ -761,14 +776,16 @@ public class Client {
                         if (handshake)
                             connected = shakeHands(myName, otherName);
                         else {
-                            File seshKeyFile = new File(myName+otherName+"Session.key");
-                            File seshKeyFileAlt = new File(otherName+myName+"Session.key");
-                            if (seshKeyFile.exists()){
-                                byte[] seshBytes = readAllBytes(seshKeyFile);
-                                sessionKey = new SecretKeySpec(seshBytes, "AES");
-                            } else if (seshKeyFileAlt.exists()) {
-                                byte[] seshBytes = readAllBytes(seshKeyFileAlt);
-                                sessionKey = new SecretKeySpec(seshBytes, "AES");
+                            if (sessionKey == null) {
+                                File seshKeyFile = new File(myName+otherName+"Session.key");
+                                File seshKeyFileAlt = new File(otherName+myName+"Session.key");
+                                if (seshKeyFile.exists()){
+                                    byte[] seshBytes = readAllBytes(seshKeyFile);
+                                    sessionKey = new SecretKeySpec(seshBytes, "AES");
+                                } else if (seshKeyFileAlt.exists()) {
+                                    byte[] seshBytes = readAllBytes(seshKeyFileAlt);
+                                    sessionKey = new SecretKeySpec(seshBytes, "AES");
+                                }
                             }
                             connected = input.readBoolean();
                         }
@@ -791,10 +808,8 @@ public class Client {
                             System.out.println();
                         } else System.out.println("Handshake Failed!");
 
-//                        while (!MyClient.isClosed()){
-//                            String request = input.readUTF();
-//                        }
                         iv = null;
+                        sessionKey = null;
                         input.close();
                         output.close();
                         MyClient.close();
