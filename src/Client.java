@@ -68,7 +68,7 @@ public class Client {
 
     private static SecretKey generateSymKeys(String name1, String name2) throws NoSuchAlgorithmException {
         KeyGenerator generator = KeyGenerator.getInstance("AES");
-        generator.init(128);
+        generator.init(256);
         SecretKey symKey = generator.generateKey();
         try (FileOutputStream fos = new FileOutputStream(name1+name2+"Session.key")) {
             fos.write(symKey.getEncoded());
@@ -180,9 +180,10 @@ public class Client {
                 hexString.append(hex);
             }
             FileWriter file;
+            imageName = imageName.substring(0, imageName.length()-4);
             if (folderName.endsWith("Sesh"))
                 file = new FileWriter(folderName+"/Session Hash.txt");
-            else file = new FileWriter(folderName+"/Image Hash.txt");
+            else file = new FileWriter(folderName+"/"+imageName+" Hash.txt");
             file.write(hexString.toString());
             file.close();
             return hexString.toString();
@@ -246,7 +247,7 @@ public class Client {
         }
     }
 
-    private static void encrypt(File zipFile, SecretKey sessionKey, IvParameterSpec iv) throws NoSuchAlgorithmException {
+    private static void encrypt(File zipFile, IvParameterSpec iv) throws NoSuchAlgorithmException {
         Cipher cipher = null;
         try {
             byte[] zipBytes = readAllBytes(zipFile);
@@ -350,8 +351,9 @@ public class Client {
         compressFiles(new String[]{dir.getName()+"/Session Hash.txt",dir.getName()+"/Session.txt"}, dir.getName()+".zip");
         File zip1stContact = new File(dir.getName()+".zip");
         sessionKey = generateSymKeys(from,to);
+
         if (iv == null) iv = generateIv();
-        encrypt(zip1stContact, sessionKey, iv);
+        encrypt(zip1stContact, iv);
         encrypt(from+to+"Session.key");
         System.out.println(sendFile(from+to+"Session.key"));
         try {
@@ -407,10 +409,9 @@ public class Client {
         }
     }
 
-    private static void decrypt(String cipheredMessage, String initVec) throws NoSuchAlgorithmException {
+    private static void decrypt(String cipheredMessage, IvParameterSpec iv) throws NoSuchAlgorithmException {
         File encryptedZip = new File(cipheredMessage+".zip");
         byte[] skBytes = readAllBytes(encryptedZip);
-        iv = new IvParameterSpec(Base64.getDecoder().decode(initVec));
         //INCOMPLETE
         try {
             Cipher decipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
@@ -433,7 +434,7 @@ public class Client {
     private static boolean decompressFiles(String zipName) {
         // Create a directory to store decompressed files
         File outputDirectory = new File(zipName);
-        outputDirectory.mkdirs();
+        if (!outputDirectory.exists()) outputDirectory.mkdirs();
         // Receive and decompress the file
         try (FileInputStream fis = new FileInputStream(zipName+".zip");
              ZipInputStream zipIn = new ZipInputStream(fis)) {
@@ -451,6 +452,7 @@ public class Client {
             }
             zipIn.close();
             fis.close();
+            new File(zipName+".zip").delete();
             return true;
         } catch (FileNotFoundException e) {
             throw new RuntimeException(e);
@@ -494,7 +496,7 @@ public class Client {
             FileWriter file;
             if (folderName.endsWith("Sesh"))
                 file = new FileWriter(folderName+"/Hashed Session.txt");
-            else file = new FileWriter(folderName+"/Hashed Picture.txt");
+            else file = new FileWriter(folderName+"/Hashed "+image.getName());
             file.write(hexString.toString());
             file.close();
             return hexString.toString();
@@ -509,9 +511,10 @@ public class Client {
         String firstHash = "";
         try {
             Scanner hash1;
+            imageName = imageName.substring(0, imageName.length()-4);
             if (folderName.endsWith("Sesh"))
                 hash1 = new Scanner(new File(folderName+"/Session Hash.txt"));
-            else hash1 = new Scanner(new File(folderName+"/Image Hash.txt"));
+            else hash1 = new Scanner(new File(folderName+"/"+imageName+" Hash.txt"));
             while (hash1.hasNext()) firstHash += hash1.nextLine();
             hash1.close();
         } catch (FileNotFoundException e) {
@@ -545,7 +548,11 @@ public class Client {
             if (!resumeSesh) {
                 output.writeBoolean(true);
                 resumeSesh = handshake(from, to);
-            } else output.writeBoolean(false);
+                if (resumeSesh) System.out.println("Handshake Complete!");
+            } else {
+                output.writeBoolean(false);
+                output.writeBoolean(resumeSesh);
+            }
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
@@ -553,6 +560,7 @@ public class Client {
     }
 
     private static boolean shakeHands(String me, String other) throws NoSuchAlgorithmException {
+        System.out.println("Handshake Initialised");
         String protocol = "Asymmetric Encryption: RSA/ECB/PKCS1Padding\n" +
                 "Symmetric Encryption: AES/CBC/PKCS5Padding\n" +
                 "Hashing Algorithm: SHA256\n" +
@@ -571,7 +579,8 @@ public class Client {
             String seshKey = input.readUTF();
             output.writeUTF(receiveFile(seshKey));
             decrypt(seshKey);
-            String iv = input.readUTF();
+            String initVec = input.readUTF();
+            iv = new IvParameterSpec(Base64.getDecoder().decode(initVec));
             String sesh = input.readUTF(); //Zip
             output.writeUTF(receiveFile(sesh));
             sesh = sesh.substring(0, sesh.length()-4);
@@ -588,23 +597,102 @@ public class Client {
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
+        System.out.println("Handshake Complete!");
         return true;
     }
 
+    private static void connectedMenu() {
+        Scanner consoleIn = new Scanner(System.in);
+        try {
+            while (!MyClient.isClosed()) {
+                int request = 0; int resp = 0;
+                if (input.available()>0)
+                    request = input.readInt();
+                else {
+                    System.out.println("What do you want to do?\nEnter the corresponding number:\n" +
+                            "1. Send Image\n" +
+                            "2. Get Image\n" +
+                            "3. End Session");
+                    resp = consoleIn.nextInt();
+                    consoleIn.nextLine();
+                    if (resp == 1) {
+                        output.writeInt(1);
+                        File[] pics = new File("Images").listFiles();
+                        for (File pic : pics)
+                            System.out.println(pic.getName());
+                        System.out.println("Type the name of the image you want to send including the extension (Case-Sensitive)");
+                        String picName = consoleIn.nextLine();
+                        hash("Images", picName);
+                        String picNameH = picName.substring(0, picName.length()-4);
+                        compressFiles(new String[]{"Images/"+picName, "Images/"+picNameH+" Hash.txt"}, "Images.zip");
+                        encrypt(new File("Images.zip"), iv);
+                        System.out.println(sendFile("Images.zip"));
+                        output.writeUTF(picName);
+                    } else if(resp == 2) {
+                        output.writeInt(2);
+                        System.out.println(input.readUTF());
+                        String image = consoleIn.nextLine();
+                        output.writeUTF(image);
+                        String picName = input.readUTF();
+                        output.writeUTF(receiveFile(picName));
+                        decrypt("Images", iv);
+                        decompressFiles("Images");
+                        if (!compareHash("Images", image)) {
+                            System.out.println("Integrity compromised: Message has been altered. Ending session");
+                            break;
+                        }
+                    } else if (resp == 3) break;
+                    Thread.sleep(8000);
+                }
+
+                if (request == 1) {
+                    String imageName = input.readUTF();
+                    output.writeUTF(receiveFile(imageName));
+                    decrypt("Images", iv);
+                    decompressFiles("Images");
+                    imageName = input.readUTF();
+                    if (!compareHash("Images", imageName)) {
+                        System.out.println("Integrity compromised: Message has been altered. Ending session");
+                        break;
+                    }
+                } else if (request == 2) {
+                    String picsMenu = "";
+                    File[] pics = new File("Images").listFiles();
+                    for (File pic : pics)
+                        picsMenu += pic.getName()+"\n";
+                    picsMenu += "Type the name of the image you want including the extension (Case-Sensitive)";
+                    output.writeUTF(picsMenu);
+                    String picName = input.readUTF();
+                    hash("Images", picName);
+                    String picNameH = picName.substring(0, picName.length()-4);
+                    compressFiles(new String[]{"Images/"+picName, "Images/"+picNameH+" Hash.txt"}, "Images.zip");
+                    encrypt(new File("Images.zip"), iv);
+                    System.out.println(sendFile("Images.zip"));
+                } else if (request == 3) break;
+            }
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException(e);
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     public static void main(String[] args) throws NoSuchAlgorithmException {
-        FilenameFilter pemFilter = (dir, name) -> name.endsWith(".pub");
-        File[] certificateFiles = new File(".").listFiles(pemFilter);
+        FilenameFilter nameFilter = (dir, name) -> name.endsWith(".pub");
+        File[] pubKeyFile = new File(".").listFiles(nameFilter);
 
         Scanner consoleIn = new Scanner(System.in);
         boolean running = true;
-        if (certificateFiles.length != 0) {
-            myName = certificateFiles[0].getName();
+        if (pubKeyFile.length != 0) {
+            myName = pubKeyFile[0].getName();
             myName = myName.substring(0, myName.length()-4);
             System.out.println("Welcome Back "+myName+"!");
         }
         else {
             System.out.println("What's your name?");
-            String myName = consoleIn.nextLine().strip();
+            myName = consoleIn.nextLine().strip();
         }
         if (myPrivateKey == null || myPublicKey == null) getKeys(myName);
         System.out.println();
@@ -627,12 +715,16 @@ public class Client {
                         System.out.println();
                         if (connect(myName, otherName)) {
                             System.out.println();
-                            output.writeBoolean(true);
                             output.writeUTF("Connected to "+otherName);
                             System.out.println(otherName+" response: "+input.readUTF());
 
                             ////////
-
+                            if (iv == null) {
+                                iv = generateIv();
+                                String ivAsString = Base64.getEncoder().encodeToString(iv.getIV());
+                                output.writeUTF(ivAsString);
+                            }
+                            connectedMenu();
                             /////////
 
                             System.out.println(otherName+" response: "+input.readUTF());
@@ -640,6 +732,7 @@ public class Client {
                             System.out.println();
                         } else System.out.println("Handshake Failed!");
 
+                        iv = null;
                         MyClient.shutdownInput();
                         MyClient.shutdownOutput();
                         input.close();
@@ -657,7 +750,7 @@ public class Client {
                     try {
                         System.out.println("waiting...");
                         ServerSocket MyService = new ServerSocket(8200);
-                        MyService.setSoTimeout(1*60*1000);
+                        MyService.setSoTimeout(45*1000);
                         MyClient = MyService.accept();
                         input = new DataInputStream(MyClient.getInputStream());
                         output = new DataOutputStream(MyClient.getOutputStream());
@@ -667,12 +760,31 @@ public class Client {
                         boolean connected;
                         if (handshake)
                             connected = shakeHands(myName, otherName);
-                        else connected = input.readBoolean();
+                        else {
+                            File seshKeyFile = new File(myName+otherName+"Session.key");
+                            File seshKeyFileAlt = new File(otherName+myName+"Session.key");
+                            if (seshKeyFile.exists()){
+                                byte[] seshBytes = readAllBytes(seshKeyFile);
+                                sessionKey = new SecretKeySpec(seshBytes, "AES");
+                            } else if (seshKeyFileAlt.exists()) {
+                                byte[] seshBytes = readAllBytes(seshKeyFileAlt);
+                                sessionKey = new SecretKeySpec(seshBytes, "AES");
+                            }
+                            connected = input.readBoolean();
+                        }
 
                         if (connected) {
                             System.out.println();
                             System.out.println(otherName+" response: "+input.readUTF());
                             output.writeUTF("Connected to "+ otherName);
+
+                            if (iv == null) {
+                                String ivAsString = input.readUTF();
+                                iv = new IvParameterSpec(Base64.getDecoder().decode(ivAsString));
+                            }
+                            System.out.println("processing...");
+                            Thread.sleep(8000);
+                            connectedMenu();
 
                             output.writeUTF("Disconnecting");
                             System.out.println(otherName+" response: "+input.readUTF());
@@ -682,6 +794,7 @@ public class Client {
 //                        while (!MyClient.isClosed()){
 //                            String request = input.readUTF();
 //                        }
+                        iv = null;
                         input.close();
                         output.close();
                         MyClient.close();
@@ -692,11 +805,19 @@ public class Client {
                         System.out.println("Sender took far too long");
                     } catch (IOException e) {
                         throw new RuntimeException(e);
+                    } catch (InterruptedException e) {
+                        throw new RuntimeException(e);
                     }
                     break;
                 }
                 case 3:
+                {
+                    FilenameFilter seshKeyFilter = (dir, name) -> name.endsWith(".key");
+                    File[] seshKeys = new File(".").listFiles(seshKeyFilter);
+                    for (File seshKey : seshKeys)
+                        seshKey.delete();
                     running = false;
+                }
             }
         } while (running);
     }
