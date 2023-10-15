@@ -1,14 +1,23 @@
 import javax.crypto.*;
-import javax.crypto.spec.IvParameterSpec;
-import javax.crypto.spec.SecretKeySpec;
-import java.io.*;
-import java.net.*;
+import javax.crypto.spec.*;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.FileWriter;
+import java.io.FilenameFilter;
+import java.io.IOException;
+import java.net.ConnectException;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.SocketException;
+import java.net.SocketTimeoutException;
+import java.net.UnknownHostException;
 import java.security.*;
 import java.security.cert.*;
-import java.security.spec.EncodedKeySpec;
-import java.security.spec.InvalidKeySpecException;
-import java.security.spec.PKCS8EncodedKeySpec;
-import java.security.spec.X509EncodedKeySpec;
+import java.security.spec.*;
 import java.util.Base64;
 import java.util.Scanner;
 import java.util.zip.ZipEntry;
@@ -63,6 +72,7 @@ public class Client {
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
+        System.out.println("RSA Keys Generated");
         return pair;
     }
 
@@ -75,6 +85,7 @@ public class Client {
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
+        System.out.println("AES Session Key Generated!");
         return symKey;
     }
 
@@ -184,6 +195,7 @@ public class Client {
             else file = new FileWriter(folderName+"/"+imageName+" Hash.txt");
             file.write(hexString.toString());
             file.close();
+            System.out.println("SHA256 Hash Generated");
             return hexString.toString();
         } catch (IOException e) {
             throw new RuntimeException(e);
@@ -203,6 +215,7 @@ public class Client {
             else stream = new FileOutputStream(folderName+"/Image Hash.txt");
             stream.write(signedHash);
             stream.close();
+            System.out.println("Hash Signed with Private Key");
         } catch (FileNotFoundException e) {
             throw new RuntimeException(e);
         } catch (NoSuchPaddingException e) {
@@ -237,6 +250,7 @@ public class Client {
             }
             zipOut.close();
             fos.close();
+            System.out.println(files.toString()+" Compressed into "+zipName);
             return  true;
         } catch (FileNotFoundException e) {
             throw new RuntimeException(e);
@@ -256,6 +270,7 @@ public class Client {
             FileOutputStream  stream = new FileOutputStream(zipFile);
             stream.write(cipherText);
             stream.close();
+            System.out.println(zipFile.getName()+" Encrypted with Session Key");
         } catch (FileNotFoundException | BadPaddingException e) {
             throw new RuntimeException(e);
         } catch (IllegalBlockSizeException | InvalidAlgorithmParameterException e) {
@@ -275,6 +290,7 @@ public class Client {
             FileOutputStream  stream = new FileOutputStream(seshKeyFileName);
             stream.write(encryptedSK);
             stream.close();
+            System.out.println(seshKeyFileName + " encrypted with recipient's public key");
         } catch (BadPaddingException | NoSuchPaddingException e) {
             throw new RuntimeException(e);
         } catch (IllegalBlockSizeException e) {
@@ -320,9 +336,11 @@ public class Client {
                 "Hashing Algorithm: SHA256\n" +
                 "Compression: Zip";
         try {
+            System.out.println("sending Client Hello & Certificate");
             output.writeUTF(CHLO);
             System.out.println(sendFile(from+".pem"));
             //Syn-Ack & certificate
+            System.out.println("receiving Server Hello & Certificate");
             boolean synAck = input.readBoolean();
             if (!synAck) return false;
             String otherCert = input.readUTF();
@@ -397,6 +415,7 @@ public class Client {
             fos.write(decryptedSK);
             fos.close();
             sessionKey = new SecretKeySpec(decryptedSK, "AES");
+            System.out.println("Decrypting "+encryptedSKname);
         } catch (BadPaddingException | NoSuchPaddingException e) {
             System.out.println("Incorrect Key!");
         } catch (IllegalBlockSizeException e) {
@@ -419,6 +438,7 @@ public class Client {
             FileOutputStream fos = new FileOutputStream(encryptedZip);
             fos.write(plainText);
             fos.close();
+            System.out.println("Decrypting "+cipheredMessage);
         } catch (NoSuchPaddingException | BadPaddingException e) {
             throw new RuntimeException(e);
         } catch (IllegalBlockSizeException | InvalidKeyException e) {
@@ -452,6 +472,7 @@ public class Client {
             zipIn.close();
             fis.close();
             new File(zipName+".zip").delete();
+            System.out.println("Unzipped "+zipName+".zip");
             return true;
         } catch (FileNotFoundException e) {
             throw new RuntimeException(e);
@@ -460,12 +481,12 @@ public class Client {
         }
     }
 
-    private static boolean verifySender(String hashFile, PublicKey sendersKey) throws NoSuchAlgorithmException {
+    private static boolean verifySender(String hashFile) throws NoSuchAlgorithmException {
         File signedHashFile = new File(hashFile);
         byte[] signedHashBytes = readAllBytes(signedHashFile);
         try {
             Cipher decipher = Cipher.getInstance("RSA/ECB/PKCS1Padding");
-            decipher.init(Cipher.DECRYPT_MODE, sendersKey);
+            decipher.init(Cipher.DECRYPT_MODE, otherPublicKey);
             byte[] decryptedSK = decipher.doFinal(signedHashBytes);
             FileOutputStream fos = new FileOutputStream(signedHashFile);
             fos.write(decryptedSK);
@@ -547,7 +568,7 @@ public class Client {
             if (!resumeSesh) {
                 output.writeBoolean(true);
                 resumeSesh = handshake(from, to);
-                if (resumeSesh) System.out.println("Handshake Complete!");
+                if (resumeSesh) System.out.println("HANDSHAKE COMPLETE!");
             } else {
                 output.writeBoolean(false);
                 output.writeBoolean(resumeSesh);
@@ -559,12 +580,13 @@ public class Client {
     }
 
     private static boolean shakeHands(String me, String other) throws NoSuchAlgorithmException {
-        System.out.println("Handshake Initialised");
+        System.out.println("HANDSHAKE INITIALISED");
         String protocol = "Asymmetric Encryption: RSA/ECB/PKCS1Padding\n" +
                 "Symmetric Encryption: AES/CBC/PKCS5Padding\n" +
                 "Hashing Algorithm: SHA256\n" +
                 "Compression: Zip";
         try {
+            System.out.println("Received SYN");
             String syn = input.readUTF();
             String otherCert = input.readUTF();
             output.writeUTF(receiveFile(otherCert));
@@ -573,6 +595,7 @@ public class Client {
                 output.writeBoolean(false); //SHLO
                 return false;
             }
+            System.out.println("Sending SYN-ACK");
             output.writeBoolean(true); //syn-ack
             System.out.println(sendFile(me+".pem"));
             String seshKey = input.readUTF();
@@ -585,19 +608,19 @@ public class Client {
             sesh = sesh.substring(0, sesh.length()-4);
             decrypt(sesh, iv);
             decompressFiles(sesh);
-            boolean auth = verifySender(sesh+"/Session Hash.txt", otherPublicKey);
+            boolean auth = verifySender(sesh+"/Session Hash.txt");
             boolean integrity = compareHash(sesh, "Session.txt");
+            System.out.println("Authentication: " + auth);
+            System.out.println("Integrity? " + integrity);
             cleanUpImagesFolder();
             if (!(auth && integrity)) {
-                System.out.println("Authentication: " + auth);
-                System.out.println("Integrity? " + integrity);
                 return false;
             }
             output.writeBoolean(true);
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
-        System.out.println("Handshake Complete!");
+        System.out.println("HANDSHAKE COMPLETE");
         return true;
     }
 
@@ -616,6 +639,7 @@ public class Client {
                 if (input.available()>0)
                     request = input.readInt();
                 else {
+                    System.out.println();
                     System.out.println("What do you want to do?\nEnter the corresponding number:\n" +
                             "1. Send Image\n" +
                             "2. Get Image\n" +
@@ -745,7 +769,7 @@ public class Client {
                             System.out.println();
                         } else System.out.println("Handshake Failed!");
 
-                        iv = null; sessionKey = null;
+                        iv = null; sessionKey = null; otherPublicKey = null;
                         MyClient.shutdownInput();
                         MyClient.shutdownOutput();
                         input.close();
@@ -787,6 +811,7 @@ public class Client {
                                     sessionKey = new SecretKeySpec(seshBytes, "AES");
                                 }
                             }
+                            if (otherPublicKey == null) otherPublicKey = getKeyFromCert(otherName+".pem");
                             connected = input.readBoolean();
                         }
 
@@ -808,7 +833,7 @@ public class Client {
                             System.out.println();
                         } else System.out.println("Handshake Failed!");
 
-                        iv = null;
+                        iv = null; otherPublicKey = null;
                         sessionKey = null;
                         input.close();
                         output.close();
@@ -818,6 +843,7 @@ public class Client {
                         throw new RuntimeException(e);
                     } catch (SocketTimeoutException e){
                         System.out.println("Sender took far too long");
+                        System.out.println();
                     } catch (IOException e) {
                         throw new RuntimeException(e);
                     } catch (InterruptedException e) {

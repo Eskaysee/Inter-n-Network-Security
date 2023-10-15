@@ -52,6 +52,7 @@ class CertificateAuthority {
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
+        System.out.println("Created Key Pair");
         return pair;
     }
 
@@ -73,6 +74,7 @@ class CertificateAuthority {
                 throw new RuntimeException(e);
             }
         }
+        System.out.println("Loaded valid certificates");
     }
 
     private void getKeys(String name) throws NoSuchAlgorithmException {
@@ -164,8 +166,6 @@ class CertificateAuthority {
                 }
             } catch (CertificateException e) {
                 throw new RuntimeException(e);
-            } catch (CertIOException e) {
-                throw new RuntimeException(e);
             } catch (OperatorCreationException e) {
                 throw new RuntimeException(e);
             } catch (IOException e) {
@@ -183,14 +183,4 @@ class CertificateAuthority {
         }
         return cert;
     }
-
-    public synchronized boolean exists(String name) {
-        return certs.containsKey(name);
-    }
-
-    public synchronized String[] certList() {
-        int len = certs.size();
-        return certs.keySet().toArray(new String[len]);
-    }
-
 }
