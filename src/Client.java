@@ -94,11 +94,14 @@ public class Client {
         File myPrivKeyFile = new File(name);
         try {
             if (myPubKeyFile.exists() && myPrivKeyFile.exists()){
-                byte[] myPubBytes = readAllBytes(myPubKeyFile);
                 byte[] myPrivBytes = readAllBytes(myPrivKeyFile);
                 KeyFactory keyFactory = KeyFactory.getInstance("RSA");
-                EncodedKeySpec myPubKeySpec = new X509EncodedKeySpec(myPubBytes);
-                myPublicKey = keyFactory.generatePublic(myPubKeySpec);
+                myPublicKey = getKeyFromCert(name);
+                if (myPublicKey == null) {
+                    myPrivKeyFile.delete(); myPubKeyFile.delete();
+                    getKeys(name);
+                    return;
+                }
                 EncodedKeySpec myPrivKeySpec = new PKCS8EncodedKeySpec(myPrivBytes);
                 myPrivateKey = keyFactory.generatePrivate(myPrivKeySpec);
                 caPublicKey = getKeyFromCert("CA");
@@ -161,15 +164,19 @@ public class Client {
             return cert.getPublicKey();
         } catch (CertificateNotYetValidException e) {
             System.out.println("Certificate isn't valid yet.");
+            new File(other+".pem").delete();
             return null;
         } catch (CertificateExpiredException e) {
-            System.out.println("Certificate is expired.");
+            System.out.println("Certificate is expired. Deleting it");
+            new File(other+".pem").delete();
             return null;
         } catch (InvalidKeyException | SignatureException e) {
-            System.out.println("Certificate Isn't From the Certificate Authority!");
+            System.out.println("Certificate Isn't From the Certificate Authority! Deleting it");
+            new File(other+".pem").delete();
             return null;
         } catch (CertificateException e) {
-            System.out.println("Faulty Certificate (Corrupted)");
+            System.out.println("Faulty Certificate (Corrupted). Deleting it");
+            new File(other+".pem").delete();
             return null;
         } catch (IOException | NoSuchProviderException e) {
             throw new RuntimeException(e);
@@ -346,7 +353,11 @@ public class Client {
             String otherCert = input.readUTF();
             output.writeUTF(receiveFile(otherCert));
             otherPublicKey = getKeyFromCert(to);
-            if (otherPublicKey == null) return false;
+            if (otherPublicKey == null) {
+                output.writeBoolean(false);
+                return false;
+            }
+            output.writeBoolean(true);
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
@@ -375,6 +386,7 @@ public class Client {
         try (FileOutputStream fos = new FileOutputStream(from+to+"Session.key")){
             output.writeUTF(Base64.getEncoder().encodeToString(iv.getIV()));
             System.out.println(sendFile(dir.getName()+".zip"));
+            cleanUpImagesFolder();
             fos.write(sessionKey.getEncoded());
             return input.readBoolean();
         } catch (IOException e) {
@@ -569,9 +581,19 @@ public class Client {
                 output.writeBoolean(true);
                 resumeSesh = handshake(from, to);
                 if (resumeSesh) System.out.println("HANDSHAKE COMPLETE!");
+                else {
+                    System.out.println("HANDSHAKE FAILED!");
+                    otherCertFile.delete();
+                    new File(from+to+"Session.key");
+                }
             } else {
                 output.writeBoolean(false);
-                output.writeBoolean(resumeSesh);
+                if (input.readBoolean()) {
+                    resumeSesh = handshake(from, to);
+                    if (resumeSesh) System.out.println("HANDSHAKE COMPLETE!");
+                    else System.out.println("HANDSHAKE FAILED!");
+                }
+                else output.writeBoolean(true);
             }
         } catch (IOException e) {
             throw new RuntimeException(e);
@@ -598,6 +620,7 @@ public class Client {
             System.out.println("Sending SYN-ACK");
             output.writeBoolean(true); //syn-ack
             System.out.println(sendFile(me+".pem"));
+            if (!input.readBoolean()) return false;
             String seshKey = input.readUTF();
             output.writeUTF(receiveFile(seshKey));
             decrypt(seshKey);
@@ -614,6 +637,10 @@ public class Client {
             System.out.println("Integrity? " + integrity);
             cleanUpImagesFolder();
             if (!(auth && integrity)) {
+                System.out.println("HANDSHAKE FAILED");
+                output.writeBoolean(false);
+                new File(other+".pem").delete();
+                new File(other+me+"Session.key").delete();
                 return false;
             }
             output.writeBoolean(true);
@@ -625,10 +652,16 @@ public class Client {
     }
 
     private static void cleanUpImagesFolder() {
-        FilenameFilter textFilter = (dir, name) -> name.endsWith(".txt");
-        File[] textFiles = new File("Images").listFiles(textFilter);
-        for (File textfile : textFiles)
-            textfile.delete();
+        FilenameFilter hashFilter = (dir, name) -> name.endsWith("Hash.txt");
+        File[] hashFiles = new File("Images").listFiles(hashFilter);
+        if (hashFiles != null) {
+            for (File textfile : hashFiles)
+                textfile.delete();
+            hashFilter = (dir, name) -> name.startsWith("Hashed");
+            hashFiles = new File("Images").listFiles(hashFilter);
+            for (File hashfile : hashFiles)
+                hashfile.delete();
+        }
     }
 
     private static void connectedMenu() {
@@ -658,6 +691,7 @@ public class Client {
                         compressFiles(new String[]{"Images/"+picName, "Images/"+picNameH+" Hash.txt"}, "Images.zip");
                         encrypt(new File("Images.zip"), iv);
                         System.out.println(sendFile("Images.zip"));
+                        cleanUpImagesFolder();
                         output.writeUTF(picName);
                     } else if(resp == 2) {
                         output.writeInt(2);
@@ -705,6 +739,7 @@ public class Client {
                     compressFiles(new String[]{"Images/"+picName, "Images/"+picNameH+" Hash.txt"}, "Images.zip");
                     encrypt(new File("Images.zip"), iv);
                     System.out.println(sendFile("Images.zip"));
+                    cleanUpImagesFolder();
                 } else if (request == 3) break;
             }
         } catch (IOException e) {
@@ -731,7 +766,7 @@ public class Client {
             System.out.println("What's your name?");
             myName = consoleIn.nextLine().strip();
         }
-        if (myPrivateKey == null || myPublicKey == null) getKeys(myName);
+        getKeys(myName);
         System.out.println();
         do {
             System.out.println("What do you want to do?\nEnter the corresponding number:\n" +
@@ -806,13 +841,20 @@ public class Client {
                                 if (seshKeyFile.exists()){
                                     byte[] seshBytes = readAllBytes(seshKeyFile);
                                     sessionKey = new SecretKeySpec(seshBytes, "AES");
+                                    output.writeBoolean(false);
+                                    if (otherPublicKey == null) otherPublicKey = getKeyFromCert(otherName);
+                                    connected = input.readBoolean();
                                 } else if (seshKeyFileAlt.exists()) {
                                     byte[] seshBytes = readAllBytes(seshKeyFileAlt);
                                     sessionKey = new SecretKeySpec(seshBytes, "AES");
+                                    output.writeBoolean(false);
+                                    if (otherPublicKey == null) otherPublicKey = getKeyFromCert(otherName);
+                                    connected = input.readBoolean();
+                                } else {
+                                    output.writeBoolean(true);
+                                    connected = shakeHands(myName, otherName);
                                 }
-                            }
-                            if (otherPublicKey == null) otherPublicKey = getKeyFromCert(otherName+".pem");
-                            connected = input.readBoolean();
+                            } else connected = true;
                         }
 
                         if (connected) {
